@@ -1,0 +1,43 @@
+pipeline{
+  agent any
+
+  options { 
+    timestamps () 
+    ansiColor('xterm')
+  }
+
+  tools {
+    nodejs 'node 8.15.0'
+  }
+
+  environment {
+    GIT_REV_PARSE = sh(returnStdout: true,script: 'git rev-parse --short HEAD').trim()
+  }
+
+  stages {
+    stage("Initialisation") {
+      steps {
+        script {
+          def dockerHome = tool 'docker'
+          env.PATH = "${dockerHome}/bin:${env.PATH}"
+        }
+        sh "npm install"
+      }
+    }
+    stage("End to End Test"){
+      steps{
+        sh 'npm run e2e'
+        withAWS(credentials:'melco-dev',region:'ap-southeast-1') {
+          s3Upload(file:'e2e/reports/', bucket:'s3-wechat-melco-bucket01', path:'cucumber-report/', acl:'PublicRead')
+        }
+        echo "Cucumber report: https://s3-ap-southeast-1.amazonaws.com/s3-wechat-melco-bucket01/cucumber-report/cucumber-report.html"
+      }
+    }
+
+    stage("Deploy to Production"){
+      steps{
+        sh 'fail deploy'
+      }
+    }
+  }
+}

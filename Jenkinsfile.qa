@@ -1,0 +1,114 @@
+pipeline {
+  agent {
+    kubernetes {
+      label 'mypod'
+      defaultContainer 'jnlp'
+      yaml """
+apiVersion: v1
+kind: Pod
+metadata:
+  namespace: dxci
+spec:
+  containers:
+  - name: node
+    image: node:9.2
+    command:
+    - cat
+    tty: true
+    volumeMounts:
+    - name: shared-data
+      mountPath: /
+  - name: k8s-awscli
+    image: docker.melco-dxeng.com/k8s-awscli:1.0.0
+    command:
+    - cat
+    tty: true
+    volumeMounts:
+    - name: shared-data
+      mountPath: /
+  - name: docker
+    image: docker:18.09.1
+    command:
+    - cat
+    tty: true
+    volumeMounts:
+    - name: shared-data
+      mountPath: /var/run/docker.sock
+  volumes:
+  - name: shared-data
+    emptyDir: {}
+    hostPath:
+      path: /var/run/docker.sock
+  imagePullSecrets:
+  - name: regcred
+"""
+    }
+  }
+  options { 
+    timestamps () 
+    ansiColor('xterm')
+  }
+  environment{
+    GIT_REV_PARSE = sh(returnStdout: true,script: 'git rev-parse --short HEAD').trim()
+    // now = timestamps()
+  }
+  stages {
+    stage("Initialisation") {
+      steps {
+        container('node') {
+          sh "npm install"
+        }
+      }
+    }
+
+    stage("Unit test") {
+      steps {
+        container('node') {
+          sh "npm run test"
+        }
+      }
+    }
+
+    stage("Build") {
+      steps {
+        container('node') {
+          sh "npm run build"
+        }
+      }
+    }
+
+    stage("Dockerize") {
+      steps {
+        container('docker') {  
+          sh "docker login -u admin -p admin123 docker.melco-dxeng.com"
+          sh "docker build -t docker.melco-dxeng.com/melco-styleguide:latest ."
+          sh "docker tag docker.melco-dxeng.com/melco-styleguide:latest docker.melco-dxeng.com/melco-styleguide:${env.GIT_REV_PARSE}"
+          sh "docker push docker.melco-dxeng.com/melco-styleguide:latest"
+          sh "docker push docker.melco-dxeng.com/melco-styleguide:${env.GIT_REV_PARSE}"
+        }
+      }
+    }
+
+    stage("Deploy to QA") {
+      steps {
+        container('k8s-awscli'){
+          sh """kubectl -n dxqa --kubeconfig /var/jenkins_home/.kube/dxeng-dxqa-kubeconfig.config patch deployment style-guide-app -p 
+          '{\"spec\":{\"template\":{\"metadata\":{\"labels\":{\"deployment-date\":"${currentBuild.startTimeInMillis}" }}}}}'"""
+        }
+      }
+    }
+
+    stage("End to End Test/ Regression Test"){
+      steps {
+        container('node') {
+          sleep 30
+          sh 'npm run e2e'
+          withAWS(credentials:'melco-dev',region:'ap-southeast-1') {
+            s3Upload(file:'e2e/reports/', bucket:'s3-wechat-melco-bucket01', path:'cucumber-report/', acl:'PublicRead')
+          }
+          echo "Cucumber report: https://s3-ap-southeast-1.amazonaws.com/s3-wechat-melco-bucket01/cucumber-report/cucumber-report.html"
+        }
+      }
+    }
+  }
+}
